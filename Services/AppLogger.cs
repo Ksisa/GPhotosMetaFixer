@@ -19,7 +19,7 @@ public class AppLogger : Microsoft.Extensions.Logging.ILogger
         
         // Configure Serilog for console output with colors
         _serilogLogger = new LoggerConfiguration()
-            .MinimumLevel.Debug()
+            .MinimumLevel.Warning()
             .WriteTo.Console(
                 outputTemplate: "[{Level:u3}] {Message:lj}{NewLine}{Exception}",
                 theme: Serilog.Sinks.SystemConsole.Themes.AnsiConsoleTheme.Code)

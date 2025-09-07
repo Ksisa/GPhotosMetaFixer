@@ -11,7 +11,7 @@ public class ProgressDisplay
     public static ProgressDisplay? ActiveInstance { get; private set; }
     
     // Temporary flag to disable progress bar rendering
-    private static bool _disabled = true;
+    private static bool _disabled = false;
 
     private readonly object _renderLock = new();
     private string _currentStep = string.Empty;

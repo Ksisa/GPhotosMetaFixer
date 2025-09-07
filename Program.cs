@@ -10,7 +10,7 @@ internal class Program
         ILogger logger = new AppLogger(nameof(Program));
         
         // Use actual source path instead of Example folder
-        var sourcePath = @"C:\Users\Kris\source\repos\GPhotosMetaFixer\tstsrc";
+        var sourcePath = @"C:\Users\Kris\Desktop\Prod\src";
         
         logger.LogInformation("Starting metadata extraction for path: {SourcePath}", sourcePath);
         
@@ -69,36 +69,31 @@ internal class Program
 
         // Writing step (copying files with new metadata fixer)
         var fixer = new NewMetadataFixer(sourcePath, logger);
-        progress.StartStep("Writing", mediaToJsonMap.Count);
+        
+        progress.StartStep("Writing", metadataList.Count);
         progress.AttachAsActive();
         
         int copiedCount = 0;
-        foreach (var kvp in mediaToJsonMap)
+        foreach (var metadata in metadataList)
         {
             try
             {
-                var metadata = new Models.MediaMetadata
-                {
-                    MediaFilePath = kvp.Key,
-                    JsonFilePath = kvp.Value
-                };
-                
-                var result = fixer.CopyFileWithDirectoryStructure(metadata);
-                if (result != null)
-                {
-                    copiedCount++;
-                }
+                fixer.FixMetadata(metadata);
+                copiedCount++;
                 
                 progress.Report(copiedCount);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to copy file: {FilePath}", kvp.Key);
+                logger.LogError(ex, "Failed to copy file: {FilePath}", metadata.MediaFilePath);
             }
         }
         
         progress.CompleteStep();
         progress.Detach();
+
+        // Process all pending metadata updates in batches for optimal performance
+        fixer.ProcessPendingUpdates();
 
         logger.LogInformation("All steps completed.");
     }
