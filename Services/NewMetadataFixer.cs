@@ -26,7 +26,14 @@ public class NewMetadataFixer
     public void FixMetadata(MediaMetadata metadata)
     {
         // Always copy the file first
-        CopyFileWithDirectoryStructure(metadata);
+        //CopyFileWithDirectoryStructure(metadata);
+
+        // Handle motion files - just copy them without any metadata processing
+        if (metadata.JsonFilePath == "motion")
+        {
+            logger.LogDebug("Motion file copied without metadata processing: {FileName}", Path.GetFileName(metadata.MediaFilePath));
+            return;
+        }
 
         // Rule 2.1: If both media and JSON time taken metadata is missing, output error log, skip
         if (RuleBothTimestampsMissing(metadata))
@@ -34,7 +41,7 @@ public class NewMetadataFixer
             return;
         }
 
-        // Rule 2.2: If media time taken metadata is missing and JSON time taken metadata is in the last 7 days, output error log, skip
+        // Rule 2.2: If media time taken metadata is missing and JSON time taken metadata is in the last 1 days, output error log, skip
         if (RuleMediaMissingJsonRecent(metadata))
         {
             return;
@@ -266,7 +273,7 @@ public class NewMetadataFixer
     }
 
     /// <summary>
-    /// Rule 2.2: If media time taken metadata is missing and JSON time taken metadata is in the last 7 days, output error log, skip
+    /// Rule 2.2: If media time taken metadata is missing and JSON time taken metadata is in the last 1 days, output error log, skip
     /// </summary>
     /// <param name="metadata">The media metadata to check</param>
     /// <returns>True if should skip (media missing and JSON recent), false otherwise</returns>
@@ -274,7 +281,7 @@ public class NewMetadataFixer
     {
         if (!metadata.MediaTimestamp.HasValue && metadata.JsonTimestamp.HasValue)
         {
-            var sevenDaysAgo = DateTime.UtcNow.AddDays(-7);
+            var sevenDaysAgo = DateTime.UtcNow.AddDays(-1);
             if (metadata.JsonTimestamp.Value > sevenDaysAgo)
             {
                 var fileName = Path.GetFileName(metadata.MediaFilePath);
@@ -299,7 +306,7 @@ public class NewMetadataFixer
             if (timeDifference <= 12)
             {
                 var fileName = Path.GetFileName(metadata.MediaFilePath);
-                logger.LogInformation("Media and JSON timestamps are within 12 hours for {FileName}. Media: {MediaTimestamp}, JSON: {JsonTimestamp}, Difference: {DifferenceHours:F1}h", 
+                logger.LogDebug("Media and JSON timestamps are within 12 hours for {FileName}. Media: {MediaTimestamp}, JSON: {JsonTimestamp}, Difference: {DifferenceHours:F1}h", 
                     fileName, metadata.MediaTimestamp.Value, metadata.JsonTimestamp.Value, timeDifference);
                 return true; // Should skip
             }
@@ -316,7 +323,13 @@ public class NewMetadataFixer
     {
         if (metadata.JsonTimestamp.HasValue)
         {
-            return true; // Will be added to batch processing queue
+            // First, ensure the file is copied to destination
+            CopyFileWithDirectoryStructure(metadata);
+            
+            // Update the file creation date to match JSON timestamp
+            UpdateFileCreationDate(metadata);
+            
+            return true; // Will be added to batch processing queue for EXIF metadata
         }
         return false; // No timestamp to update
     }
@@ -382,6 +395,44 @@ public class NewMetadataFixer
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to copy file: {SourcePath}", metadata.MediaFilePath);
+        }
+    }
+
+    /// <summary>
+    /// Updates the file creation date to match the JSON timestamp
+    /// </summary>
+    /// <param name="metadata">The media metadata containing the JSON timestamp</param>
+    private void UpdateFileCreationDate(MediaMetadata metadata)
+    {
+        try
+        {
+            if (!metadata.JsonTimestamp.HasValue)
+            {
+                return;
+            }
+
+            var destinationRoot = GetDestinationRoot();
+            var relativePath = Path.GetRelativePath(sourceRoot, metadata.MediaFilePath);
+            var destinationPath = Path.Combine(destinationRoot, relativePath);
+
+            if (!File.Exists(destinationPath))
+            {
+                logger.LogWarning("Destination file does not exist for creation date update: {DestinationPath}", destinationPath);
+                return;
+            }
+
+            var jsonTimestamp = metadata.JsonTimestamp.Value;
+            
+            // Update file creation time, last write time, and last access time to match JSON timestamp
+            File.SetCreationTime(destinationPath, jsonTimestamp);
+            File.SetLastWriteTime(destinationPath, jsonTimestamp);
+            File.SetLastAccessTime(destinationPath, jsonTimestamp);
+            
+            logger.LogDebug("Updated file timestamps for: {DestinationPath} to {Timestamp}", destinationPath, jsonTimestamp);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to update file creation date for: {FilePath}", metadata.MediaFilePath);
         }
     }
 
