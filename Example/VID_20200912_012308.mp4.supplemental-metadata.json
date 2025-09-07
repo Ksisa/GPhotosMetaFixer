@@ -1,0 +1,29 @@
+{
+  "title": "VID_20200912_012308.mp4",
+  "description": "",
+  "imageViews": "103",
+  "creationTime": {
+    "timestamp": "1609197908",
+    "formatted": "28 Dec 2020, 23:25:08 UTC"
+  },
+  "photoTakenTime": {
+    "timestamp": "1599862995",
+    "formatted": "11 Sept 2020, 22:23:15 UTC"
+  },
+  "geoData": {
+    "latitude": 0.0,
+    "longitude": 0.0,
+    "altitude": 0.0,
+    "latitudeSpan": 0.0,
+    "longitudeSpan": 0.0
+  },
+  "url": "https://photos.google.com/photo/AF1QipMeJh8aPKpvGPM_HMyOEova6gUmt0FF0zPhxtG-",
+  "googlePhotosOrigin": {
+    "mobileUpload": {
+      "deviceFolder": {
+        "localFolderName": ""
+      },
+      "deviceType": "ANDROID_PHONE"
+    }
+  }
+}
