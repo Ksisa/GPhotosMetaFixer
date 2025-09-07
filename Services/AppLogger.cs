@@ -43,7 +43,10 @@ public class AppLogger : Microsoft.Extensions.Logging.ILogger
         var message = formatter(state, exception);
         var serilogLevel = ConvertLogLevel(logLevel);
 
+        // Ensure logs do not collide with the progress line: clear line, write log, then re-render bar
+        ProgressDisplay.ClearLineIfActive();
         _serilogLogger.Write(serilogLevel, exception, message);
+        ProgressDisplay.ReRenderIfActive();
     }
 
     private static LogEventLevel ConvertLogLevel(LogLevel logLevel)

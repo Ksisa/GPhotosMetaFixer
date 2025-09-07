@@ -24,6 +24,8 @@ public class DirectoryFileMatcher(ILogger logger)
     /// Set of .json files in a directory
     /// </summary>
     private readonly Dictionary<string, HashSet<string>> _directoryJsonCache = new();
+    private Action<int>? _progressCallback;
+    private int _processedCount;
 
     /// <summary>
     /// As of writing this, it seems the metadata files have a 51 length limit
@@ -65,9 +67,33 @@ public class DirectoryFileMatcher(ILogger logger)
         foreach (var mediaFile in mediaFiles)
         {
             CheckForJsonFile(mediaFile);
+            // Report progress after each media file checked
+            if (_progressCallback != null)
+            {
+                _processedCount++;
+                _progressCallback(_processedCount);
+            }
         }
 
         return MediaToJsonMapping;
+    }
+
+    /// <summary>
+    /// Progress-enabled scan. Reports processed media count via callback.
+    /// </summary>
+    public Dictionary<string, string> ScanDirectory(string directoryPath, Action<int> progressCallback)
+    {
+        _progressCallback = progressCallback;
+        _processedCount = 0;
+        try
+        {
+            return ScanDirectory(directoryPath);
+        }
+        finally
+        {
+            _progressCallback = null;
+            _processedCount = 0;
+        }
     }
 
     public void CheckForJsonFile(string filePath)

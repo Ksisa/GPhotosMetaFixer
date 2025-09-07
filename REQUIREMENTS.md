@@ -45,3 +45,4 @@ I want this app to read all of the files in a directory recursively:
 - The solution should be open source for others in similar situations
 - Handle all the edge cases that make PowerShell scripting too complex
 - Multi-step process approach
+
