@@ -7,81 +7,88 @@ internal class Program
 {
     static void Main(string[] args)
     {
-        ILogger logger = new AppLogger(nameof(Program));
-        
-        // Use actual source path instead of Example folder
+        var logger = new AppLogger(nameof(Program));
         var sourcePath = @"C:\Users\Kris\Desktop\Prod\src";
+        var progress = new ProgressDisplay();
         
         logger.LogInformation("Starting metadata extraction for path: {SourcePath}", sourcePath);
         
+        // Step 1: Match media files with JSON metadata
+        var mediaToJsonMap = MatchMediaFiles(sourcePath, logger, progress);
+        
+        // Step 2: Extract metadata from matched files
+        var metadataList = ExtractMetadata(mediaToJsonMap, logger, progress);
+        
+        // Step 3: Copy files to destination and fix metadata
+        var fileManager = new FileManager(sourcePath, logger);
+        CopyFiles(fileManager, metadataList, logger, progress);
+        
+        // Step 4: Fix metadata
+        var fixer = FixMetadata(fileManager, metadataList, logger, progress);
+        
+        // Step 5: Process pending EXIF updates
+        ProcessExifUpdates(fixer, logger, progress);
+        
+        logger.LogInformation("All steps completed.");
+    }
+
+    private static Dictionary<string, string> MatchMediaFiles(string sourcePath, ILogger logger, ProgressDisplay progress)
+    {
         var matcher = new DirectoryFileMatcher(logger);
-
-        var progress = new ProgressDisplay();
-
-        // Matching step
-        // Estimate media file count by quick scan to set a total for the bar
-        var allFiles = Directory.GetFiles(sourcePath, "*", SearchOption.AllDirectories);
-        var mediaCandidates = allFiles.Where(f => !f.EndsWith(".json", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var mediaCandidates = Directory.GetFiles(sourcePath, "*", SearchOption.AllDirectories)
+            .Where(f => !f.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+            
         progress.StartStep("Matching", mediaCandidates.Length);
         progress.AttachAsActive();
-        var mediaToJsonMap = matcher.ScanDirectory(sourcePath, processed => progress.Report(processed));
+        
+        var mediaToJsonMap = matcher.ScanDirectory(sourcePath, progress.Report);
         progress.CompleteStep();
         
         logger.LogInformation("Found {FileCount} media files to process", mediaToJsonMap.Count);
-        
+        return mediaToJsonMap;
+    }
+
+    private static List<Models.MediaMetadata> ExtractMetadata(Dictionary<string, string> mediaToJsonMap, ILogger logger, ProgressDisplay progress)
+    {
         var metadataExtractor = new Services.MetadataExtractor(logger);
-        
-        // Process each file and collect metadata
         var metadataList = new List<Models.MediaMetadata>();
-        int processedCount = 0;
         
-        // Extracting step
         progress.StartStep("Extracting", mediaToJsonMap.Count);
         progress.AttachAsActive();
+        
         foreach (var kvp in mediaToJsonMap)
         {
             try
             {
                 var metadata = metadataExtractor.ExtractMetadata(kvp.Key, kvp.Value);
                 metadataList.Add(metadata);
-                processedCount++;
-                progress.Report(processedCount);
-                
-                // Periodic progress logs removed; progress bar handles visual feedback
+                progress.Report(metadataList.Count);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to process file: {FilePath}", kvp.Key);
             }
         }
+        
         progress.CompleteStep();
-        
-        logger.LogInformation("Metadata extraction completed. Processed {ProcessedCount} files.", processedCount);
+        logger.LogInformation("Metadata extraction completed. Processed {ProcessedCount} files.", metadataList.Count);
+        return metadataList;
+    }
 
-        // Geo report: media missing geo but JSON has geo
-        var missingMediaGeoButJsonHas = metadataList.Where(m => m.MediaGeolocation == null && m.JsonGeolocation != null).ToList();
-        logger.LogInformation("Geo report: {Count} files where media lacks geo but JSON has it (out of {Total}).", missingMediaGeoButJsonHas.Count, metadataList.Count);
-        
-        foreach (var item in missingMediaGeoButJsonHas)
-        {
-            logger.LogInformation("Missing geo in media but present in JSON: {FilePath}", Path.GetFileName(item.MediaFilePath));
-        }
-
-        // Writing step (copying files with new metadata fixer)
-        var fixer = new NewMetadataFixer(sourcePath, logger);
-        
-        progress.StartStep("Writing", metadataList.Count);
+    private static void CopyFiles(FileManager fileManager, List<Models.MediaMetadata> metadataList, ILogger logger, ProgressDisplay progress)
+    {
+        progress.StartStep("Copying Files", metadataList.Count);
         progress.AttachAsActive();
         
-        int copiedCount = 0;
+        var processedCount = 0;
         foreach (var metadata in metadataList)
         {
             try
             {
-                fixer.FixMetadata(metadata);
-                copiedCount++;
-                
-                progress.Report(copiedCount);
+                fileManager.CopyFileToDestination(metadata.MediaFilePath);
+                processedCount++;
+                progress.Report(processedCount);
             }
             catch (Exception ex)
             {
@@ -91,10 +98,56 @@ internal class Program
         
         progress.CompleteStep();
         progress.Detach();
+    }
 
-        // Process all pending metadata updates in batches for optimal performance
-        fixer.ProcessPendingUpdates();
+    private static NewMetadataFixer FixMetadata(FileManager fileManager, List<Models.MediaMetadata> metadataList, ILogger logger, ProgressDisplay progress)
+    {
+        var fixer = new NewMetadataFixer(logger, fileManager);
+        
+        progress.StartStep("Processing Metadata", metadataList.Count);
+        progress.AttachAsActive();
+        
+        var processedCount = 0;
+        var lockObject = new object();
+        
+        // Process metadata in parallel for better performance
+        Parallel.ForEach(metadataList, new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Environment.ProcessorCount
+        }, metadata => {
+            try
+            {
+                fixer.FixMetadata(metadata);
+                
+                lock (lockObject)
+                {
+                    processedCount++;
+                    progress.Report(processedCount);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to fix metadata for file: {FilePath}", metadata.MediaFilePath);
+            }
+        });
+        
+        progress.CompleteStep();
+        progress.Detach();
+        return fixer;
+    }
 
-        logger.LogInformation("All steps completed.");
+    private static void ProcessExifUpdates(NewMetadataFixer fixer, ILogger logger, ProgressDisplay progress)
+    {
+        if (fixer.PendingUpdatesCount > 0)
+        {
+            logger.LogInformation("Found {Count} files requiring EXIF metadata updates", fixer.PendingUpdatesCount);
+            progress.AttachAsActive();
+            fixer.ProcessPendingUpdates(progress);
+            progress.Detach();
+        }
+        else
+        {
+            logger.LogInformation("No files require EXIF metadata updates");
+        }
     }
 }

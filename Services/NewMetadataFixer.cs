@@ -6,18 +6,16 @@ namespace GPhotosMetaFixer.Services;
 /// <summary>
 /// A clean, focused metadata fixer that handles file operations and metadata corrections with batch processing
 /// </summary>
-public class NewMetadataFixer
+public class NewMetadataFixer(ILogger logger, FileManager fileManager)
 {
-    private readonly string sourceRoot;
-    private readonly ILogger logger;
+    private readonly ILogger logger = logger;
     private readonly List<MetadataUpdate> pendingUpdates = new();
+    private readonly FileManager fileManager = fileManager;
 
-    public NewMetadataFixer(string sourceRoot, ILogger logger)
-    {
-        this.sourceRoot = sourceRoot;
-        this.logger = logger;
-        PrepareDestinationDirectory();
-    }
+    /// <summary>
+    /// Gets the count of pending metadata updates
+    /// </summary>
+    public int PendingUpdatesCount => pendingUpdates.Count;
 
     /// <summary>
     /// Fixes metadata by copying files to destination directory with proper structure
@@ -25,56 +23,27 @@ public class NewMetadataFixer
     /// <param name="metadata">The media metadata containing source file path</param>
     public void FixMetadata(MediaMetadata metadata)
     {
-        // Always copy the file first
-        //CopyFileWithDirectoryStructure(metadata);
-
-        // Handle motion files - just copy them without any metadata processing
+        // Handle motion files - just skip them without any metadata processing
         if (metadata.JsonFilePath == "motion")
         {
-            logger.LogDebug("Motion file copied without metadata processing: {FileName}", Path.GetFileName(metadata.MediaFilePath));
+            // Skip motion files silently for better performance
             return;
         }
 
-        // Rule 2.1: If both media and JSON time taken metadata is missing, output error log, skip
-        if (RuleBothTimestampsMissing(metadata))
+        // Apply business rules to determine if metadata should be updated
+        if (ShouldSkipMetadataUpdate(metadata))
         {
             return;
         }
 
-        // Rule 2.2: If media time taken metadata is missing and JSON time taken metadata is in the last 1 days, output error log, skip
-        if (RuleMediaMissingJsonRecent(metadata))
-        {
-            return;
-        }
-
-        // Rule 2.3: If media time taken metadata is within 12h of JSON time taken metadata, output info log, skip
-        if (RuleTimestampsWithin12Hours(metadata))
-        {
-            return;
-        }
-
-        // Rule 2.4: Otherwise, overwrite the media time taken metadata with JSON time taken metadata
-        if (RuleOverwriteMediaTimestamp(metadata))
-        {
-            // Add to batch processing queue instead of processing immediately
-            var destinationRoot = GetDestinationRoot();
-            var relativePath = Path.GetRelativePath(sourceRoot, metadata.MediaFilePath);
-            var destinationPath = Path.Combine(destinationRoot, relativePath);
-            
-            pendingUpdates.Add(new MetadataUpdate
-            {
-                FilePath = destinationPath,
-                NewTimestamp = metadata.JsonTimestamp!.Value,
-                IsImage = IsImageFile(Path.GetExtension(destinationPath).ToLowerInvariant())
-            });
-            return;
-        }
+        // Add to batch processing queue for EXIF metadata update
+        QueueMetadataUpdate(metadata);
     }
 
     /// <summary>
     /// Processes all pending metadata updates in batches for optimal performance
     /// </summary>
-    public void ProcessPendingUpdates()
+    public void ProcessPendingUpdates(ProgressDisplay? progress = null)
     {
         if (pendingUpdates.Count == 0)
         {
@@ -88,371 +57,150 @@ public class NewMetadataFixer
         var imageUpdates = pendingUpdates.Where(u => u.IsImage).ToList();
         var videoUpdates = pendingUpdates.Where(u => !u.IsImage).ToList();
 
-        // Process images in batches
-        if (imageUpdates.Count > 0)
-        {
-            ProcessBatchUpdates(imageUpdates, "image");
-        }
+        progress?.StartStep("EXIF Processing", pendingUpdates.Count);
 
-        // Process videos in batches
-        if (videoUpdates.Count > 0)
-        {
-            ProcessBatchUpdates(videoUpdates, "video");
-        }
+        // Process images and videos in parallel batches
+        ProcessFileTypeBatch(imageUpdates, "image", progress);
+        ProcessFileTypeBatch(videoUpdates, "video", progress);
 
-        // Clear the pending updates
+        progress?.CompleteStep();
         pendingUpdates.Clear();
     }
 
     /// <summary>
-    /// Processes a batch of metadata updates using exiftool
+    /// Processes a batch of files of a specific type (image or video)
     /// </summary>
-    private void ProcessBatchUpdates(List<MetadataUpdate> updates, string fileType)
+    private void ProcessFileTypeBatch(List<MetadataUpdate> updates, string fileType, ProgressDisplay? progress)
     {
-        const int batchSize = 10; // Process 10 files at a time
-        
-        for (int i = 0; i < updates.Count; i += batchSize)
+        if (updates.Count == 0) return;
+
+        logger.LogDebug("Processing {Count} {FileType} files in parallel", updates.Count, fileType);
+
+        var processedCount = 0;
+        var lockObject = new object();
+
+        Parallel.ForEach(updates, new ParallelOptions
         {
-            var batch = updates.Skip(i).Take(batchSize).ToList();
-            ProcessSingleBatch(batch, fileType);
-        }
+            MaxDegreeOfParallelism = Environment.ProcessorCount
+        }, update => {
+            ProcessFileMetadata(update, fileType);
+            
+            // Simple thread-safe progress reporting
+            if (progress != null)
+            {
+                lock (lockObject)
+                {
+                    processedCount++;
+                    progress.Report(processedCount);
+                }
+            }
+        });
+
+        logger.LogDebug("Completed processing {Count} {FileType} files", updates.Count, fileType);
     }
 
     /// <summary>
-    /// Processes a single batch of files with exiftool
+    /// Processes a single file's metadata using exiftool
     /// </summary>
-    private void ProcessSingleBatch(List<MetadataUpdate> batch, string fileType)
+    private void ProcessFileMetadata(MetadataUpdate update, string fileType)
     {
         try
         {
-            if (fileType == "image")
+            var timestamp = update.NewTimestamp.ToLocalTime().ToString("yyyy:MM:dd HH:mm:ss");
+            var fileName = Path.GetFileName(update.FilePath);
+            var args = BuildExifToolArguments(update.FilePath, timestamp, fileType);
+            
+            if (RunExifTool(args, out var stdOut, out var stdErr))
             {
-                ProcessImageBatch(batch);
+                logger.LogDebug("Updated {FileType} metadata for: {FileName}", fileType, fileName);
             }
             else
             {
-                ProcessVideoBatch(batch);
+                logger.LogWarning("Failed to update {FileType} metadata for: {FileName}. Error: {StdErr}", 
+                    fileType, fileName, stdErr);
             }
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to process batch of {FileType} files", fileType);
+            logger.LogError(ex, "Error processing {FileType} file: {FilePath}", fileType, update.FilePath);
         }
     }
 
     /// <summary>
-    /// Processes a batch of image files with optimized exiftool command
-    /// If batch fails, retries each file individually
+    /// Determines if metadata update should be skipped based on business rules
     /// </summary>
-    private void ProcessImageBatch(List<MetadataUpdate> batch)
+    private bool ShouldSkipMetadataUpdate(MediaMetadata metadata)
     {
-        var filePaths = batch.Select(u => $"\"{u.FilePath}\"").ToArray();
-        var filesArg = string.Join(" ", filePaths);
-        
-        // Use the first file's timestamp as a template (they should all be similar for batch processing)
-        var firstUpdate = batch.First();
-        var dtLocal = firstUpdate.NewTimestamp.ToLocalTime();
-        var exifDate = dtLocal.ToString("yyyy:MM:dd HH:mm:ss");
-
-        // Optimized exiftool command with performance flags
-        // -overwrite_original: modify files in place (faster than creating backups)
-        // -q: quiet mode (less output processing)
-        // -n: don't print tag names (faster)
-        // -P: preserve file modification date (faster)
-        var args = $"-overwrite_original -q -n -P -DateTimeOriginal=\"{exifDate}\" -CreateDate=\"{exifDate}\" -ModifyDate=\"{exifDate}\" {filesArg}";
-        
-        if (RunExifTool(args, out var stdOut, out var stdErr))
-        {
-            logger.LogDebug("Updated EXIF metadata for batch of {Count} images", batch.Count);
-        }
-        else
-        {
-            logger.LogWarning("Failed to update EXIF metadata for batch of {Count} images. Retrying individual files. Batch error: {StdErr}", 
-                batch.Count, stdErr);
-            
-            // Retry each file individually
-            foreach (var update in batch)
-            {
-                ProcessIndividualImage(update);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Processes a batch of video files with optimized exiftool command
-    /// If batch fails, retries each file individually
-    /// </summary>
-    private void ProcessVideoBatch(List<MetadataUpdate> batch)
-    {
-        var filePaths = batch.Select(u => $"\"{u.FilePath}\"").ToArray();
-        var filesArg = string.Join(" ", filePaths);
-        
-        // Use the first file's timestamp as a template
-        var firstUpdate = batch.First();
-        var dtLocal = firstUpdate.NewTimestamp.ToLocalTime();
-        var qtDate = dtLocal.ToString("yyyy:MM:dd HH:mm:ss");
-
-        // Optimized exiftool command with performance flags
-        var args = $"-overwrite_original -q -n -P -MediaCreateDate=\"{qtDate}\" -CreateDate=\"{qtDate}\" -ModifyDate=\"{qtDate}\" -TrackCreateDate=\"{qtDate}\" -TrackModifyDate=\"{qtDate}\" -MediaModifyDate=\"{qtDate}\" {filesArg}";
-        
-        if (RunExifTool(args, out var stdOut, out var stdErr))
-        {
-            logger.LogDebug("Updated QuickTime metadata for batch of {Count} videos", batch.Count);
-        }
-        else
-        {
-            logger.LogWarning("Failed to update QuickTime metadata for batch of {Count} videos. Retrying individual files. Batch error: {StdErr}", 
-                batch.Count, stdErr);
-            
-            // Retry each file individually
-            foreach (var update in batch)
-            {
-                ProcessIndividualVideo(update);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Processes a single image file with exiftool
-    /// </summary>
-    private void ProcessIndividualImage(MetadataUpdate update)
-    {
-        var dtLocal = update.NewTimestamp.ToLocalTime();
-        var exifDate = dtLocal.ToString("yyyy:MM:dd HH:mm:ss");
-        var fileName = Path.GetFileName(update.FilePath);
-
-        var args = $"-overwrite_original -q -n -P -DateTimeOriginal=\"{exifDate}\" -CreateDate=\"{exifDate}\" -ModifyDate=\"{exifDate}\" \"{update.FilePath}\"";
-        
-        if (RunExifTool(args, out var stdOut, out var stdErr))
-        {
-            logger.LogDebug("Updated EXIF metadata for individual image: {FileName}", fileName);
-        }
-        else
-        {
-            logger.LogWarning("Failed to update EXIF metadata for individual image: {FileName}. Error: {StdErr}", 
-                fileName, stdErr);
-        }
-    }
-
-    /// <summary>
-    /// Processes a single video file with exiftool
-    /// </summary>
-    private void ProcessIndividualVideo(MetadataUpdate update)
-    {
-        var dtLocal = update.NewTimestamp.ToLocalTime();
-        var qtDate = dtLocal.ToString("yyyy:MM:dd HH:mm:ss");
-        var fileName = Path.GetFileName(update.FilePath);
-
-        var args = $"-overwrite_original -q -n -P -MediaCreateDate=\"{qtDate}\" -CreateDate=\"{qtDate}\" -ModifyDate=\"{qtDate}\" -TrackCreateDate=\"{qtDate}\" -TrackModifyDate=\"{qtDate}\" -MediaModifyDate=\"{qtDate}\" \"{update.FilePath}\"";
-        
-        if (RunExifTool(args, out var stdOut, out var stdErr))
-        {
-            logger.LogDebug("Updated QuickTime metadata for individual video: {FileName}", fileName);
-        }
-        else
-        {
-            logger.LogWarning("Failed to update QuickTime metadata for individual video: {FileName}. Error: {StdErr}", 
-                fileName, stdErr);
-        }
-    }
-
-    /// <summary>
-    /// Rule 2.1: If both media and JSON time taken metadata is missing, output error log, skip
-    /// </summary>
-    /// <param name="metadata">The media metadata to check</param>
-    /// <returns>True if both timestamps are missing (should skip), false otherwise</returns>
-    public bool RuleBothTimestampsMissing(MediaMetadata metadata)
-    {
+        // Rule 1: Both timestamps missing
         if (!metadata.MediaTimestamp.HasValue && !metadata.JsonTimestamp.HasValue)
         {
-            var fileName = Path.GetFileName(metadata.MediaFilePath);
-            logger.LogError("Both media and JSON timestamp metadata missing for {FileName}", fileName);
-            return true; // Should skip
+            logger.LogError("Both media and JSON timestamp metadata missing for {FileName}", Path.GetFileName(metadata.MediaFilePath));
+            return true;
         }
-        return false; // Should not skip
-    }
 
-    /// <summary>
-    /// Rule 2.2: If media time taken metadata is missing and JSON time taken metadata is in the last 1 days, output error log, skip
-    /// </summary>
-    /// <param name="metadata">The media metadata to check</param>
-    /// <returns>True if should skip (media missing and JSON recent), false otherwise</returns>
-    public bool RuleMediaMissingJsonRecent(MediaMetadata metadata)
-    {
+        // Rule 2: Media missing and JSON is recent (within 1 day)
         if (!metadata.MediaTimestamp.HasValue && metadata.JsonTimestamp.HasValue)
         {
-            var sevenDaysAgo = DateTime.UtcNow.AddDays(-1);
-            if (metadata.JsonTimestamp.Value > sevenDaysAgo)
+            var oneDayAgo = DateTime.UtcNow.AddDays(-1);
+            if (metadata.JsonTimestamp.Value > oneDayAgo)
             {
-                var fileName = Path.GetFileName(metadata.MediaFilePath);
-                logger.LogError("Media timestamp missing and JSON timestamp is recent (within 7 days) for {FileName}. JSON timestamp: {JsonTimestamp}", 
-                    fileName, metadata.JsonTimestamp.Value);
-                return true; // Should skip
+                logger.LogError("Media timestamp missing and JSON timestamp is recent for {FileName}. JSON timestamp: {JsonTimestamp}", 
+                    Path.GetFileName(metadata.MediaFilePath), metadata.JsonTimestamp.Value);
+                return true;
             }
         }
-        return false; // Should not skip
-    }
 
-    /// <summary>
-    /// Rule 2.3: If media time taken metadata is within 12h of JSON time taken metadata, output info log, skip
-    /// </summary>
-    /// <param name="metadata">The media metadata to check</param>
-    /// <returns>True if should skip (timestamps within 12h), false otherwise</returns>
-    public bool RuleTimestampsWithin12Hours(MediaMetadata metadata)
-    {
+        // Rule 3: Timestamps are within 12 hours
         if (metadata.MediaTimestamp.HasValue && metadata.JsonTimestamp.HasValue)
         {
             var timeDifference = Math.Abs((metadata.MediaTimestamp.Value - metadata.JsonTimestamp.Value).TotalHours);
             if (timeDifference <= 12)
             {
-                var fileName = Path.GetFileName(metadata.MediaFilePath);
-                logger.LogDebug("Media and JSON timestamps are within 12 hours for {FileName}. Media: {MediaTimestamp}, JSON: {JsonTimestamp}, Difference: {DifferenceHours:F1}h", 
-                    fileName, metadata.MediaTimestamp.Value, metadata.JsonTimestamp.Value, timeDifference);
-                return true; // Should skip
+                // Skip debug logging for better performance - only log errors
+                return true;
             }
         }
-        return false; // Should not skip
+
+        return false; // Should proceed with update
     }
 
     /// <summary>
-    /// Rule 2.4: Otherwise, overwrite the media time taken metadata with JSON time taken metadata
+    /// Queues a metadata update for batch processing
     /// </summary>
-    /// <param name="metadata">The media metadata to process</param>
-    /// <returns>True if timestamp was updated, false otherwise</returns>
-    public bool RuleOverwriteMediaTimestamp(MediaMetadata metadata)
+    private void QueueMetadataUpdate(MediaMetadata metadata)
     {
-        if (metadata.JsonTimestamp.HasValue)
+        if (!metadata.JsonTimestamp.HasValue) return;
+
+        var destinationPath = fileManager.GetDestinationPath(metadata.MediaFilePath);
+        var extension = Path.GetExtension(destinationPath).ToLowerInvariant();
+        
+        pendingUpdates.Add(new MetadataUpdate
         {
-            // First, ensure the file is copied to destination
-            CopyFileWithDirectoryStructure(metadata);
-            
-            // Update the file creation date to match JSON timestamp
-            UpdateFileCreationDate(metadata);
-            
-            return true; // Will be added to batch processing queue for EXIF metadata
-        }
-        return false; // No timestamp to update
+            FilePath = destinationPath,
+            NewTimestamp = metadata.JsonTimestamp.Value,
+            IsImage = IsImageFile(extension)
+        });
+
+        // Update file creation date to match JSON timestamp
+        fileManager.UpdateFileCreationDate(destinationPath, metadata.JsonTimestamp.Value);
     }
 
-    #region files
+    #region ExifTool Operations
 
     /// <summary>
-    /// Prepares the destination directory by recreating the entire directory structure from the source
+    /// Builds exiftool arguments for the specified file type and timestamp
     /// </summary>
-    private void PrepareDestinationDirectory()
+    private static string BuildExifToolArguments(string filePath, string timestamp, string fileType)
     {
-        try
+        var baseArgs = $"-overwrite_original -q -n -P";
+        
+        if (fileType == "image")
         {
-            var destinationRoot = GetDestinationRoot();
-            
-            // Get all directories in the source folder
-            var sourceDirectories = Directory.GetDirectories(sourceRoot, "*", SearchOption.AllDirectories);
-            
-            // Create the destination root first
-            EnsureDirectoryExists(destinationRoot);
-            
-            // Create each subdirectory in the destination
-            foreach (var sourceDir in sourceDirectories)
-            {
-                var relativePath = Path.GetRelativePath(sourceRoot, sourceDir);
-                var destinationDir = Path.Combine(destinationRoot, relativePath);
-                EnsureDirectoryExists(destinationDir);
-            }
-            
-            logger.LogDebug("Prepared destination directory structure with {DirectoryCount} directories", sourceDirectories.Length);
+            return $"{baseArgs} -DateTimeOriginal=\"{timestamp}\" -CreateDate=\"{timestamp}\" -ModifyDate=\"{timestamp}\" \"{filePath}\"";
         }
-        catch (Exception ex)
+        else
         {
-            logger.LogError(ex, "Failed to prepare destination directory structure");
-        }
-    }
-
-    /// <summary>
-    /// Copies a media file to the destination directory while preserving the directory structure
-    /// </summary>
-    /// <param name="metadata">The media metadata containing source file path</param>
-    /// <returns>The destination file path if successful, null if failed</returns>
-    private void CopyFileWithDirectoryStructure(MediaMetadata metadata)
-    {
-        try
-        {
-            var sourcePath = metadata.MediaFilePath;
-            
-            if (!File.Exists(sourcePath))
-            {
-                logger.LogWarning("Source file does not exist: {SourcePath}", sourcePath);
-                return;
-            }
-
-            var destinationRoot = GetDestinationRoot();
-            var relativePath = Path.GetRelativePath(sourceRoot, sourcePath);
-            var destinationPath = Path.Combine(destinationRoot, relativePath);
-
-            File.Copy(sourcePath, destinationPath, overwrite: true);
-            
-            logger.LogDebug("Copied file: {SourcePath} -> {DestinationPath}", sourcePath, destinationPath);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to copy file: {SourcePath}", metadata.MediaFilePath);
-        }
-    }
-
-    /// <summary>
-    /// Updates the file creation date to match the JSON timestamp
-    /// </summary>
-    /// <param name="metadata">The media metadata containing the JSON timestamp</param>
-    private void UpdateFileCreationDate(MediaMetadata metadata)
-    {
-        try
-        {
-            if (!metadata.JsonTimestamp.HasValue)
-            {
-                return;
-            }
-
-            var destinationRoot = GetDestinationRoot();
-            var relativePath = Path.GetRelativePath(sourceRoot, metadata.MediaFilePath);
-            var destinationPath = Path.Combine(destinationRoot, relativePath);
-
-            if (!File.Exists(destinationPath))
-            {
-                logger.LogWarning("Destination file does not exist for creation date update: {DestinationPath}", destinationPath);
-                return;
-            }
-
-            var jsonTimestamp = metadata.JsonTimestamp.Value;
-            
-            // Update file creation time, last write time, and last access time to match JSON timestamp
-            File.SetCreationTime(destinationPath, jsonTimestamp);
-            File.SetLastWriteTime(destinationPath, jsonTimestamp);
-            File.SetLastAccessTime(destinationPath, jsonTimestamp);
-            
-            logger.LogDebug("Updated file timestamps for: {DestinationPath} to {Timestamp}", destinationPath, jsonTimestamp);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to update file creation date for: {FilePath}", metadata.MediaFilePath);
-        }
-    }
-
-    /// <summary>
-    /// Gets the destination root directory path (parent of source root + "dst")
-    /// </summary>
-    private string GetDestinationRoot()
-    {
-        var parentDir = Path.GetDirectoryName(sourceRoot);
-        return Path.Combine(parentDir!, "dst");
-    }
-
-    /// <summary>
-    /// Ensures the specified directory exists, creating it only if it doesn't already exist
-    /// </summary>
-    private void EnsureDirectoryExists(string directoryPath)
-    {
-        if (!Directory.Exists(directoryPath))
-        {
-            Directory.CreateDirectory(directoryPath);
+            return $"{baseArgs} -MediaCreateDate=\"{timestamp}\" -CreateDate=\"{timestamp}\" -ModifyDate=\"{timestamp}\" -TrackCreateDate=\"{timestamp}\" -TrackModifyDate=\"{timestamp}\" -MediaModifyDate=\"{timestamp}\" \"{filePath}\"";
         }
     }
 
@@ -497,16 +245,7 @@ public class NewMetadataFixer
         return imageExtensions.Contains(extension);
     }
 
-    /// <summary>
-    /// Checks if the file extension is a video file
-    /// </summary>
-    private static bool IsVideoFile(string extension)
-    {
-        var videoExtensions = new[] { ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".mkv", ".m4v" };
-        return videoExtensions.Contains(extension);
-    }
-
-    #endregion files
+    #endregion ExifTool Operations
 }
 
 /// <summary>
