@@ -1,3 +1,4 @@
+using GPhotosMetaFixer.Options;
 using Microsoft.Extensions.Logging;
 
 namespace GPhotosMetaFixer.Services;
@@ -7,22 +8,20 @@ namespace GPhotosMetaFixer.Services;
 /// </summary>
 public class FileManager
 {
-    private readonly string sourceRoot;
-    private readonly string destinationRoot;
     private readonly ILogger logger;
+    private readonly ApplicationOptions options;
 
-    public FileManager(string sourceRoot, ILogger logger)
+    public FileManager(ApplicationOptions options, ILogger logger)
     {
-        this.sourceRoot = sourceRoot;
+        this.options = options;
         this.logger = logger;
-        this.destinationRoot = GetDestinationRoot();
         PrepareDestinationDirectory();
     }
 
     /// <summary>
     /// Gets the destination root directory path
     /// </summary>
-    public string DestinationRoot => destinationRoot;
+    public string DestinationRoot => GetDestinationRoot();
 
     /// <summary>
     /// Copies a file to the destination directory while preserving the directory structure
@@ -39,11 +38,18 @@ public class FileManager
                 return null;
             }
 
-            var relativePath = Path.GetRelativePath(sourceRoot, sourceFilePath);
-            var destinationPath = Path.Combine(destinationRoot, relativePath);
+            var relativePath = Path.GetRelativePath(options.SourceFolder, sourceFilePath);
+            var destinationPath = Path.Combine(DestinationRoot, relativePath);
 
-            File.Copy(sourceFilePath, destinationPath, overwrite: true);
-            logger.LogDebug("Copied file: {SourcePath} -> {DestinationPath}", sourceFilePath, destinationPath);
+            if (options.DryRun)
+            {
+                logger.LogDebug("[DRY RUN] Would copy file: {SourcePath} -> {DestinationPath}", sourceFilePath, destinationPath);
+            }
+            else
+            {
+                File.Copy(sourceFilePath, destinationPath, overwrite: true);
+                logger.LogDebug("Copied file: {SourcePath} -> {DestinationPath}", sourceFilePath, destinationPath);
+            }
             
             return destinationPath;
         }
@@ -69,11 +75,17 @@ public class FileManager
                 return;
             }
 
-            File.SetCreationTime(filePath, timestamp);
-            File.SetLastWriteTime(filePath, timestamp);
-            File.SetLastAccessTime(filePath, timestamp);
-            
-            logger.LogDebug("Updated file timestamps for: {FilePath} to {Timestamp}", filePath, timestamp);
+            if (options.DryRun)
+            {
+                logger.LogDebug("[DRY RUN] Would update file timestamps for: {FilePath} to {Timestamp}", filePath, timestamp);
+            }
+            else
+            {
+                File.SetCreationTime(filePath, timestamp);
+                File.SetLastWriteTime(filePath, timestamp);
+                File.SetLastAccessTime(filePath, timestamp);
+                logger.LogDebug("Updated file timestamps for: {FilePath} to {Timestamp}", filePath, timestamp);
+            }
         }
         catch (Exception ex)
         {
@@ -88,8 +100,8 @@ public class FileManager
     /// <returns>The corresponding destination file path</returns>
     public string GetDestinationPath(string sourceFilePath)
     {
-        var relativePath = Path.GetRelativePath(sourceRoot, sourceFilePath);
-        return Path.Combine(destinationRoot, relativePath);
+        var relativePath = Path.GetRelativePath(options.SourceFolder, sourceFilePath);
+        return Path.Combine(DestinationRoot, relativePath);
     }
 
     /// <summary>
@@ -99,13 +111,13 @@ public class FileManager
     {
         try
         {
-            EnsureDirectoryExists(destinationRoot);
+            EnsureDirectoryExists(DestinationRoot);
             
-            var sourceDirectories = Directory.GetDirectories(sourceRoot, "*", SearchOption.AllDirectories);
+            var sourceDirectories = Directory.GetDirectories(options.SourceFolder, "*", SearchOption.AllDirectories);
             foreach (var sourceDir in sourceDirectories)
             {
-                var relativePath = Path.GetRelativePath(sourceRoot, sourceDir);
-                var destinationDir = Path.Combine(destinationRoot, relativePath);
+                var relativePath = Path.GetRelativePath(options.SourceFolder, sourceDir);
+                var destinationDir = Path.Combine(DestinationRoot, relativePath);
                 EnsureDirectoryExists(destinationDir);
             }
             
@@ -118,11 +130,18 @@ public class FileManager
     }
 
     /// <summary>
-    /// Gets the destination root directory path (parent of source root + "dst")
+    /// Gets the destination root directory path
     /// </summary>
     private string GetDestinationRoot()
     {
-        var parentDir = Path.GetDirectoryName(sourceRoot);
+        // If destination folder is specified, use it; otherwise auto-generate
+        if (!string.IsNullOrWhiteSpace(options.DestinationFolder))
+        {
+            return options.DestinationFolder;
+        }
+        
+        // Auto-generate: parent of source root + "dst"
+        var parentDir = Path.GetDirectoryName(options.SourceFolder);
         return Path.Combine(parentDir!, "dst");
     }
 

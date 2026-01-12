@@ -1,4 +1,5 @@
 using GPhotosMetaFixer.Models;
+using GPhotosMetaFixer.Options;
 using Microsoft.Extensions.Logging;
 
 namespace GPhotosMetaFixer.Services;
@@ -6,11 +7,12 @@ namespace GPhotosMetaFixer.Services;
 /// <summary>
 /// A clean, focused metadata fixer that handles file operations and metadata corrections with batch processing
 /// </summary>
-public class NewMetadataFixer(ILogger logger, FileManager fileManager)
+public class NewMetadataFixer(ILogger logger, FileManager fileManager, ApplicationOptions options)
 {
     private readonly ILogger logger = logger;
     private readonly List<MetadataUpdate> pendingUpdates = new();
     private readonly FileManager fileManager = fileManager;
+    private readonly ApplicationOptions options = options;
 
     /// <summary>
     /// Gets the count of pending metadata updates
@@ -108,6 +110,14 @@ public class NewMetadataFixer(ILogger logger, FileManager fileManager)
         {
             var timestamp = update.NewTimestamp.ToLocalTime().ToString("yyyy:MM:dd HH:mm:ss");
             var fileName = Path.GetFileName(update.FilePath);
+            
+            if (options.DryRun)
+            {
+                logger.LogDebug("[DRY RUN] Would update {FileType} metadata for: {FileName} to {Timestamp}", 
+                    fileType, fileName, timestamp);
+                return;
+            }
+            
             var args = BuildExifToolArguments(update.FilePath, timestamp, fileType);
             
             if (RunExifTool(args, out var stdOut, out var stdErr))

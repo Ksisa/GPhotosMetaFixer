@@ -1,4 +1,5 @@
-﻿using GPhotosMetaFixer.Services;
+﻿using GPhotosMetaFixer.Options;
+using GPhotosMetaFixer.Services;
 using Microsoft.Extensions.Logging;
 
 namespace GPhotosMetaFixer;
@@ -8,26 +9,39 @@ internal class Program
     static void Main(string[] args)
     {
         var logger = new AppLogger(nameof(Program));
-        var sourcePath = @"C:\Users\Kris\Desktop\Prod\src";
+        
+        // Initialize options with defaults
+        var options = new ApplicationOptions
+        {
+            SourceFolder = @"C:\Users\Kris\Desktop\Prod\src",
+            DestinationFolder = string.Empty, // Will be auto-generated if empty
+            DryRun = false,
+            LogFile = string.Empty
+        };
+        
         var progress = new ProgressDisplay();
         
-        logger.LogInformation("Starting metadata extraction for path: {SourcePath}", sourcePath);
+        logger.LogInformation("Starting metadata extraction for path: {SourcePath}", options.SourceFolder);
+        if (options.DryRun)
+        {
+            logger.LogInformation("DRY RUN MODE: No files will be modified");
+        }
         
         // Step 1: Match media files with JSON metadata
-        var mediaToJsonMap = MatchMediaFiles(sourcePath, logger, progress);
+        var mediaToJsonMap = MatchMediaFiles(options.SourceFolder, logger, progress);
         
         // Step 2: Extract metadata from matched files
         var metadataList = ExtractMetadata(mediaToJsonMap, logger, progress);
         
         // Step 3: Copy files to destination and fix metadata
-        var fileManager = new FileManager(sourcePath, logger);
-        CopyFiles(fileManager, metadataList, logger, progress);
+        var fileManager = new FileManager(options, logger);
+        CopyFiles(fileManager, metadataList, logger, progress, options);
         
         // Step 4: Fix metadata
-        var fixer = FixMetadata(fileManager, metadataList, logger, progress);
+        var fixer = FixMetadata(fileManager, metadataList, logger, progress, options);
         
         // Step 5: Process pending EXIF updates
-        ProcessExifUpdates(fixer, logger, progress);
+        ProcessExifUpdates(fixer, logger, progress, options);
         
         logger.LogInformation("All steps completed.");
     }
@@ -76,7 +90,7 @@ internal class Program
         return metadataList;
     }
 
-    private static void CopyFiles(FileManager fileManager, List<Models.MediaMetadata> metadataList, ILogger logger, ProgressDisplay progress)
+    private static void CopyFiles(FileManager fileManager, List<Models.MediaMetadata> metadataList, ILogger logger, ProgressDisplay progress, ApplicationOptions options)
     {
         progress.StartStep("Copying Files", metadataList.Count);
         progress.AttachAsActive();
@@ -100,9 +114,9 @@ internal class Program
         progress.Detach();
     }
 
-    private static NewMetadataFixer FixMetadata(FileManager fileManager, List<Models.MediaMetadata> metadataList, ILogger logger, ProgressDisplay progress)
+    private static NewMetadataFixer FixMetadata(FileManager fileManager, List<Models.MediaMetadata> metadataList, ILogger logger, ProgressDisplay progress, ApplicationOptions options)
     {
-        var fixer = new NewMetadataFixer(logger, fileManager);
+        var fixer = new NewMetadataFixer(logger, fileManager, options);
         
         progress.StartStep("Processing Metadata", metadataList.Count);
         progress.AttachAsActive();
@@ -136,7 +150,7 @@ internal class Program
         return fixer;
     }
 
-    private static void ProcessExifUpdates(NewMetadataFixer fixer, ILogger logger, ProgressDisplay progress)
+    private static void ProcessExifUpdates(NewMetadataFixer fixer, ILogger logger, ProgressDisplay progress, ApplicationOptions options)
     {
         if (fixer.PendingUpdatesCount > 0)
         {
