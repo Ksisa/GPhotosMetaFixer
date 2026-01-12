@@ -1,4 +1,5 @@
-﻿using GPhotosMetaFixer.Options;
+﻿using CommandLine;
+using GPhotosMetaFixer.Options;
 using GPhotosMetaFixer.Services;
 using Microsoft.Extensions.Logging;
 
@@ -9,23 +10,24 @@ internal class Program
     static void Main(string[] args)
     {
         var logger = new AppLogger(nameof(Program));
-        
-        // Initialize options with defaults
-        var options = new ApplicationOptions
-        {
-            SourceFolder = @"C:\Users\Kris\Desktop\Prod\src",
-            DestinationFolder = string.Empty, // Will be auto-generated if empty
-            DryRun = false,
-            LogFile = string.Empty
-        };
-        
-        var progress = new ProgressDisplay();
-        
-        logger.LogInformation("Starting metadata extraction for path: {SourcePath}", options.SourceFolder);
+
+        Parser.Default.ParseArguments<ApplicationOptions>(args)
+            .WithParsed(options => Run(options, logger))
+            .WithNotParsed(errors => HandleParseErrors(errors, logger));
+    }
+
+    private static void Run(ApplicationOptions options, ILogger logger)
+    {
+        logger.LogInformation("Starting GPhotosMetaFixer...");
+        logger.LogInformation("Source Path: {SourcePath}", options.SourceFolder);
+        logger.LogInformation("Dry Run: {DryRun}", options.DryRun);
+
         if (options.DryRun)
         {
-            logger.LogInformation("DRY RUN MODE: No files will be modified");
+            logger.LogWarning("DRY RUN ENABLED. No changes will be made to files.");
         }
+        
+        var progress = new ProgressDisplay();
         
         // Step 1: Match media files with JSON metadata
         var mediaToJsonMap = MatchMediaFiles(options.SourceFolder, logger, progress);
@@ -46,20 +48,39 @@ internal class Program
         logger.LogInformation("All steps completed.");
     }
 
+    private static void HandleParseErrors(IEnumerable<Error> errors, ILogger logger)
+    {
+        logger.LogError("Failed to parse command line arguments.");
+        foreach (var error in errors)
+        {
+            logger.LogError("{Error}", error.ToString());
+        }
+    }
+
     private static Dictionary<string, string> MatchMediaFiles(string sourcePath, ILogger logger, ProgressDisplay progress)
     {
         var matcher = new DirectoryFileMatcher(logger);
-        var mediaCandidates = Directory.GetFiles(sourcePath, "*", SearchOption.AllDirectories)
-            .Where(f => !f.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
+        
+        // Count JSON files for progress reporting since the matcher iterates over JSON files
+        // Use try-catch for directory access in case path is invalid
+        int jsonFileCount = 0;
+        try 
+        {
+            jsonFileCount = Directory.GetFiles(sourcePath, "*.json", SearchOption.AllDirectories).Length;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error accessing source directory: {SourcePath}", sourcePath);
+            return new Dictionary<string, string>();
+        }
             
-        progress.StartStep("Matching", mediaCandidates.Length);
+        progress.StartStep("Matching", jsonFileCount);
         progress.AttachAsActive();
         
         var mediaToJsonMap = matcher.ScanDirectory(sourcePath, progress.Report);
         progress.CompleteStep();
         
-        logger.LogInformation("Found {FileCount} media files to process", mediaToJsonMap.Count);
+        logger.LogInformation("Found {FileCount} media files with metadata", mediaToJsonMap.Count);
         return mediaToJsonMap;
     }
 
