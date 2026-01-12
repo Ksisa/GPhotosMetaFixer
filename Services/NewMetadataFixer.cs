@@ -1,6 +1,7 @@
 using GPhotosMetaFixer.Models;
 using GPhotosMetaFixer.Options;
 using Microsoft.Extensions.Logging;
+using System.Globalization;
 
 namespace GPhotosMetaFixer.Services;
 
@@ -105,17 +106,17 @@ public class NewMetadataFixer(ILogger logger, FileManager fileManager, Applicati
     {
         try
         {
-            var timestamp = update.NewTimestamp.ToLocalTime().ToString("yyyy:MM:dd HH:mm:ss");
+            var timestamp = update.NewTimestamp.ToLocalTime().ToString("yyyy:MM:dd HH:mm:ss", CultureInfo.InvariantCulture);
             var fileName = Path.GetFileName(update.FilePath);
             
             if (options.DryRun)
             {
-                logger.LogDebug("[DRY RUN] Would update {FileType} metadata for: {FileName} to {Timestamp}", 
-                    fileType, fileName, timestamp);
+                logger.LogDebug("[DRY RUN] Would update {FileType} metadata for: {FileName} to {Timestamp} (Geo: {HasGeo})", 
+                    fileType, fileName, timestamp, update.Geolocation != null);
                 return;
             }
             
-            var args = BuildExifToolArguments(update.FilePath, timestamp, fileType);
+            var args = BuildExifToolArguments(update.FilePath, timestamp, fileType, update.Geolocation);
             
             if (RunExifTool(args, out var stdOut, out var stdErr))
             {
@@ -123,8 +124,8 @@ public class NewMetadataFixer(ILogger logger, FileManager fileManager, Applicati
             }
             else
             {
-                logger.LogWarning("Failed to update {FileType} metadata for: {FileName}. Error: {StdErr}", 
-                    fileType, fileName, stdErr);
+                logger.LogWarning("Failed to update {FileType} metadata for: {FileName}. Error: {StdErr}. Output: {StdOut}", 
+                    fileType, fileName, stdErr, stdOut);
             }
         }
         catch (Exception ex)
@@ -145,11 +146,11 @@ public class NewMetadataFixer(ILogger logger, FileManager fileManager, Applicati
             return true;
         }
 
-        // Rule 2: Media missing and JSON is recent (within 1 day)
+        // Rule 2: Media missing and JSON is recent (within 12 hours)
         if (!metadata.MediaTimestamp.HasValue && metadata.JsonTimestamp.HasValue)
         {
-            var oneDayAgo = DateTime.UtcNow.AddHours(12);
-            if (metadata.JsonTimestamp.Value > oneDayAgo)
+            var twelveHoursAgo = DateTime.UtcNow.AddHours(-12);
+            if (metadata.JsonTimestamp.Value > twelveHoursAgo)
             {
                 logger.LogError("Media timestamp missing and JSON timestamp is recent for {FileName}. JSON timestamp: {JsonTimestamp}", 
                     Path.GetFileName(metadata.MediaFilePath), metadata.JsonTimestamp.Value);
@@ -170,11 +171,20 @@ public class NewMetadataFixer(ILogger logger, FileManager fileManager, Applicati
         var destinationPath = fileManager.GetDestinationPath(metadata.MediaFilePath);
         var extension = Path.GetExtension(destinationPath).ToLowerInvariant();
         
+        // Determine if we should update geolocation
+        // Logic: Update if JSON has geo data AND media file does NOT have geo data
+        GeoLocation? geoToUpdate = null;
+        if (metadata.JsonGeolocation != null && metadata.MediaGeolocation == null)
+        {
+            geoToUpdate = metadata.JsonGeolocation;
+        }
+
         pendingUpdates.Add(new MetadataUpdate
         {
             FilePath = destinationPath,
             NewTimestamp = metadata.JsonTimestamp.Value,
-            IsImage = IsImageFile(extension)
+            IsImage = IsImageFile(extension),
+            Geolocation = geoToUpdate
         });
 
         // Update file creation date to match JSON timestamp
@@ -186,18 +196,35 @@ public class NewMetadataFixer(ILogger logger, FileManager fileManager, Applicati
     /// <summary>
     /// Builds exiftool arguments for the specified file type and timestamp
     /// </summary>
-    private static string BuildExifToolArguments(string filePath, string timestamp, string fileType)
+    private static string BuildExifToolArguments(string filePath, string timestamp, string fileType, GeoLocation? location)
     {
         var baseArgs = $"-overwrite_original -q -n -P";
-        
+        var dateArgs = "";
+        var geoArgs = "";
+
         if (fileType == "image")
         {
-            return $"{baseArgs} -DateTimeOriginal=\"{timestamp}\" -CreateDate=\"{timestamp}\" -ModifyDate=\"{timestamp}\" \"{filePath}\"";
+            dateArgs = $"-DateTimeOriginal=\"{timestamp}\" -CreateDate=\"{timestamp}\" -ModifyDate=\"{timestamp}\"";
         }
         else
         {
-            return $"{baseArgs} -MediaCreateDate=\"{timestamp}\" -CreateDate=\"{timestamp}\" -ModifyDate=\"{timestamp}\" -TrackCreateDate=\"{timestamp}\" -TrackModifyDate=\"{timestamp}\" -MediaModifyDate=\"{timestamp}\" \"{filePath}\"";
+            dateArgs = $"-MediaCreateDate=\"{timestamp}\" -CreateDate=\"{timestamp}\" -ModifyDate=\"{timestamp}\" -TrackCreateDate=\"{timestamp}\" -TrackModifyDate=\"{timestamp}\" -MediaModifyDate=\"{timestamp}\"";
         }
+
+        if (location != null)
+        {
+            // Note: ExifTool handles negative values correctly for lat/long ref if passed as numbers
+            // But strict standard requires Ref tags (N/S, E/W). ExifTool's smart handling usually works with simple assignment.
+            // For robustness, we assign to both the value and the Ref tag logic implicitly by just setting the main tag with the signed value.
+            // ExifTool is smart enough to set the Ref tags automatically when provided with signed coordinates.
+            geoArgs = $"-GPSLatitude={location.Latitude} -GPSLongitude={location.Longitude}";
+            if (location.Altitude.HasValue)
+            {
+                geoArgs += $" -GPSAltitude={location.Altitude.Value}";
+            }
+        }
+
+        return $"{baseArgs} {dateArgs} {geoArgs} \"{filePath}\"";
     }
 
     /// <summary>
@@ -251,5 +278,6 @@ public class MetadataUpdate
 {
     public string FilePath { get; set; } = string.Empty;
     public DateTime NewTimestamp { get; set; }
+    public GeoLocation? Geolocation { get; set; }
     public bool IsImage { get; set; }
 }

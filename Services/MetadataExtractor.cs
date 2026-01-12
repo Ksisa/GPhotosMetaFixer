@@ -77,7 +77,7 @@ public class MetadataExtractor(ILogger logger)
         // Extract GPS data from EXIF
         var gpsDir = directories.OfType<GpsDirectory>().FirstOrDefault();
         var location = gpsDir?.GetGeoLocation();
-        if (location != null)
+        if (location != null && IsValidGeoLocation(location.Latitude, location.Longitude))
         {
             metadata.MediaGeolocation = new GPhotosGeoLocation
             {
@@ -112,7 +112,11 @@ public class MetadataExtractor(ILogger logger)
             var gpsLocation = metaDir?.GetString(QuickTimeMetadataHeaderDirectory.TagGpsLocation);
             if (!string.IsNullOrEmpty(gpsLocation))
             {
-                metadata.MediaGeolocation = ParseQuickTimeGpsLocation(gpsLocation);
+                var parsedLocation = ParseQuickTimeGpsLocation(gpsLocation);
+                if (parsedLocation != null && IsValidGeoLocation(parsedLocation.Latitude, parsedLocation.Longitude))
+                {
+                    metadata.MediaGeolocation = parsedLocation;
+                }
             }
         }
         catch (ImageProcessingException ex)
