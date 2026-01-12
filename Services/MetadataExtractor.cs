@@ -28,26 +28,17 @@ public class MetadataExtractor(ILogger logger)
             JsonFilePath = jsonFilePath
         };
 
-        SafeExecute(() => ExtractMediaFileMetadata(metadata), "media file", mediaFilePath);
-        SafeExecute(() => ExtractJsonMetadata(metadata), "JSON file", jsonFilePath);
-
-        return metadata;
-    }
-
-    /// <summary>
-    /// Helper method to safely execute operations with error handling
-    /// </summary>
-    private void SafeExecute(Action action, string fileType, string filePath)
-    {
         try
         {
-            action();
+            ExtractMediaFileMetadata(metadata);
+            ExtractJsonMetadata(metadata);
         }
         catch (Exception ex)
         {
-            logger.LogWarning("Failed to extract metadata from {FileType} {FilePath}: {Error}", 
-                fileType, filePath, ex.Message);
+            logger.LogError(ex, "Failed to extract metadata from {FilePath}: {Error}", mediaFilePath, ex.Message);
         }
+
+        return metadata;
     }
 
     /// <summary>
@@ -101,25 +92,35 @@ public class MetadataExtractor(ILogger logger)
     /// </summary>
     private void ExtractVideoMetadata(MediaMetadata metadata)
     {
-        var directories = ImageMetadataReader.ReadMetadata(metadata.MediaFilePath);
-        
-        // Extract timestamp from QuickTime metadata
-        var header = directories.OfType<QuickTimeMovieHeaderDirectory>().FirstOrDefault();
-        if (header?.TryGetDateTime(QuickTimeMovieHeaderDirectory.TagCreated, out var timestamp) == true ||
-            header?.TryGetDateTime(QuickTimeMovieHeaderDirectory.TagModified, out timestamp) == true)
+        try
         {
-            if (IsValidTimestamp(timestamp))
+            var directories = ImageMetadataReader.ReadMetadata(metadata.MediaFilePath);
+            
+            // Extract timestamp from QuickTime metadata
+            var header = directories.OfType<QuickTimeMovieHeaderDirectory>().FirstOrDefault();
+            if (header?.TryGetDateTime(QuickTimeMovieHeaderDirectory.TagCreated, out var timestamp) == true ||
+                header?.TryGetDateTime(QuickTimeMovieHeaderDirectory.TagModified, out timestamp) == true)
             {
-                metadata.MediaTimestamp = timestamp;
+                if (IsValidTimestamp(timestamp))
+                {
+                    metadata.MediaTimestamp = timestamp;
+                }
+            }
+            
+            // Extract GPS data from QuickTime metadata
+            var metaDir = directories.OfType<QuickTimeMetadataHeaderDirectory>().FirstOrDefault();
+            var gpsLocation = metaDir?.GetString(QuickTimeMetadataHeaderDirectory.TagGpsLocation);
+            if (!string.IsNullOrEmpty(gpsLocation))
+            {
+                metadata.MediaGeolocation = ParseQuickTimeGpsLocation(gpsLocation);
             }
         }
-        
-        // Extract GPS data from QuickTime metadata
-        var metaDir = directories.OfType<QuickTimeMetadataHeaderDirectory>().FirstOrDefault();
-        var gpsLocation = metaDir?.GetString(QuickTimeMetadataHeaderDirectory.TagGpsLocation);
-        if (!string.IsNullOrEmpty(gpsLocation))
+        catch (ImageProcessingException ex)
         {
-            metadata.MediaGeolocation = ParseQuickTimeGpsLocation(gpsLocation);
+            // MetadataExtractor library doesn't support all video formats (e.g., .mkv)
+            // This is expected for some formats, so log as debug/warning, not error
+            logger.LogWarning("Video format not supported by metadata library: {FilePath}. Error: {Error}", 
+                metadata.MediaFilePath, ex.Message);
         }
         
         // Fallback to file creation time (only if it's valid)
@@ -147,9 +148,12 @@ public class MetadataExtractor(ILogger logger)
             return;
         }
 
-        // Extract timestamp from JSON
-        metadata.JsonTimestamp = googlePhotosData.PhotoTakenTime?.ToDateTime() ?? 
-                                googlePhotosData.CreationTime?.ToDateTime();
+        // Extract raw timestamps from JSON
+        metadata.JsonPhotoTakenTime = googlePhotosData.PhotoTakenTime?.ToDateTime();
+        metadata.JsonCreationTime = googlePhotosData.CreationTime?.ToDateTime();
+
+        // Note: The decision on which timestamp to use (JsonTimestamp) is now deferred 
+        // to the NewMetadataFixer service, which can apply business logic.
 
         // Extract geolocation from JSON
         var geoData = googlePhotosData.GeoData;
@@ -218,5 +222,3 @@ public class MetadataExtractor(ILogger logger)
         return null;
     }
 }
-
-

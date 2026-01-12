@@ -4,7 +4,7 @@ namespace GPhotosMetaFixer.Options;
 
 public class ApplicationOptions
 {
-    [Option('s', "source", Required = false, HelpText = "Source folder path containing Google Photos takeout.", Default = @"C:\Users\Kris\source\repos\GPhotosMetaFixer\tstsrc")]
+    [Option('s', "source", Required = false, HelpText = "Source folder path containing Google Photos takeout.")]
     public string SourceFolder { get; set; }
 
     [Option('d', "dest", Required = false, HelpText = "Destination folder for fixed files. Defaults to 'dst' folder next to source.")]

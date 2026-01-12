@@ -69,23 +69,22 @@ public class FileManager
     {
         try
         {
+            if (options.DryRun)
+            {
+                logger.LogDebug("[DRY RUN] Would update file timestamps for: {FilePath} to {Timestamp}", filePath, timestamp);
+                return;
+            }
+
             if (!File.Exists(filePath))
             {
                 logger.LogWarning("Destination file does not exist for creation date update: {FilePath}", filePath);
                 return;
             }
 
-            if (options.DryRun)
-            {
-                logger.LogDebug("[DRY RUN] Would update file timestamps for: {FilePath} to {Timestamp}", filePath, timestamp);
-            }
-            else
-            {
-                File.SetCreationTime(filePath, timestamp);
-                File.SetLastWriteTime(filePath, timestamp);
-                File.SetLastAccessTime(filePath, timestamp);
-                logger.LogDebug("Updated file timestamps for: {FilePath} to {Timestamp}", filePath, timestamp);
-            }
+            File.SetCreationTime(filePath, timestamp);
+            File.SetLastWriteTime(filePath, timestamp);
+            File.SetLastAccessTime(filePath, timestamp);
+            logger.LogDebug("Updated file timestamps for: {FilePath} to {Timestamp}", filePath, timestamp);
         }
         catch (Exception ex)
         {
@@ -109,6 +108,12 @@ public class FileManager
     /// </summary>
     private void PrepareDestinationDirectory()
     {
+        if (options.DryRun)
+        {
+            logger.LogInformation("[DRY RUN] Would prepare destination directory structure");
+            return;
+        }
+
         try
         {
             EnsureDirectoryExists(DestinationRoot);

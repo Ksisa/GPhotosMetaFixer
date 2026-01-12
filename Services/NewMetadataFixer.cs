@@ -25,12 +25,9 @@ public class NewMetadataFixer(ILogger logger, FileManager fileManager, Applicati
     /// <param name="metadata">The media metadata containing source file path</param>
     public void FixMetadata(MediaMetadata metadata)
     {
-        // Handle motion files - just skip them without any metadata processing
-        if (metadata.JsonFilePath == "motion")
-        {
-            // Skip motion files silently for better performance
-            return;
-        }
+        // Determine which JSON timestamp to use
+        // Prioritize PhotoTakenTime, fallback to CreationTime
+        metadata.JsonTimestamp = metadata.JsonPhotoTakenTime ?? metadata.JsonCreationTime;
 
         // Apply business rules to determine if metadata should be updated
         if (ShouldSkipMetadataUpdate(metadata))
@@ -151,22 +148,11 @@ public class NewMetadataFixer(ILogger logger, FileManager fileManager, Applicati
         // Rule 2: Media missing and JSON is recent (within 1 day)
         if (!metadata.MediaTimestamp.HasValue && metadata.JsonTimestamp.HasValue)
         {
-            var oneDayAgo = DateTime.UtcNow.AddDays(-1);
+            var oneDayAgo = DateTime.UtcNow.AddHours(12);
             if (metadata.JsonTimestamp.Value > oneDayAgo)
             {
                 logger.LogError("Media timestamp missing and JSON timestamp is recent for {FileName}. JSON timestamp: {JsonTimestamp}", 
                     Path.GetFileName(metadata.MediaFilePath), metadata.JsonTimestamp.Value);
-                return true;
-            }
-        }
-
-        // Rule 3: Timestamps are within 12 hours
-        if (metadata.MediaTimestamp.HasValue && metadata.JsonTimestamp.HasValue)
-        {
-            var timeDifference = Math.Abs((metadata.MediaTimestamp.Value - metadata.JsonTimestamp.Value).TotalHours);
-            if (timeDifference <= 12)
-            {
-                // Skip debug logging for better performance - only log errors
                 return true;
             }
         }

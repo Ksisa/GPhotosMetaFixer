@@ -16,7 +16,20 @@ public class MediaMetadata
     public GeoLocation? MediaGeolocation { get; set; }
 
     /// <summary>
-    /// Timestamp extracted from the Google Photos JSON metadata file
+    /// The 'photoTakenTime' timestamp extracted from the Google Photos JSON metadata file.
+    /// This is usually the most accurate timestamp for when the media was captured.
+    /// </summary>
+    public DateTime? JsonPhotoTakenTime { get; set; }
+
+    /// <summary>
+    /// The 'creationTime' timestamp extracted from the Google Photos JSON metadata file.
+    /// This represents when the file was created in Google Photos (uploaded), which might differ from taken time.
+    /// </summary>
+    public DateTime? JsonCreationTime { get; set; }
+
+    /// <summary>
+    /// The final chosen timestamp to apply to the file.
+    /// This is determined by the MetadataFixer based on business rules using JsonPhotoTakenTime and JsonCreationTime.
     /// </summary>
     public DateTime? JsonTimestamp { get; set; }
 
